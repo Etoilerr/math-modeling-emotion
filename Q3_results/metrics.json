@@ -1,0 +1,20 @@
+{
+  "valid": {
+    "accuracy": 0.6236,
+    "macro_f1": 0.6147,
+    "mae": 0.6167,
+    "pearson": 0.6095
+  },
+  "test": {
+    "accuracy": 0.6355,
+    "macro_f1": 0.612,
+    "mae": 0.653,
+    "pearson": 0.6447
+  },
+  "distillation": {
+    "teacher": "MAMFN_d64",
+    "student": "AEMN_d32",
+    "T": 4.0,
+    "alpha": 0.7
+  }
+}

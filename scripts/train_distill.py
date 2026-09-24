@@ -1,0 +1,168 @@
+# -*- coding: utf-8 -*-
+"""
+知识蒸馏：教师 MAMFN(d=64) -> 学生 AEMN(d=32)。
+L = α·T²·KL(教师/T, 学生/T) + (1-α)·CE(学生, 真实) + λ·Huber(学生回归, 真实)
+温度 T=4, α=0.7。学生更轻量，同时保留 Q3 需要的 α/β 注意力。
+"""
+import os, sys, json, pickle, time
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from paths import (ALIGNED_50, Q3_DIR, Q3_MODEL, Q3_METRICS, Q3_CONFIG, Q2_MODEL)
+from model_common import (set_seed, build_mask, fit_scaler, apply_scaler,
+                          MAMFN, AEMN, compute_metrics,
+                          SEED, BATCH_SIZE, EPOCHS, LR, WEIGHT_DECAY,
+                          LAMBDA_CE, LAMBDA_MSE, D_MODEL, T_MAX)
+
+DEVICE = torch.device("cpu")
+set_seed(SEED)
+T_DISTILL = 4.0
+ALPHA_DISTILL = 0.7
+STUDENT_D = 32  # 学生比教师小一半
+
+
+def to_tensors(d):
+    return (torch.tensor(d["text"], dtype=torch.float32),
+            torch.tensor(d["audio"], dtype=torch.float32),
+            torch.tensor(d["vision"], dtype=torch.float32),
+            torch.tensor(d["classification_labels"], dtype=torch.long),
+            torch.tensor(d["regression_labels"], dtype=torch.float32))
+
+
+class DS(Dataset):
+    def __init__(self, t, a, v, c, r, mt, ma, mv):
+        self.t, self.a, self.v, self.c, self.r = t, a, v, c, r
+        self.mt, self.ma, self.mv = mt, ma, mv
+
+    def __len__(self):
+        return len(self.c)
+
+    def __getitem__(self, i):
+        return self.t[i], self.a[i], self.v[i], self.mt[i], self.ma[i], self.mv[i], self.c[i], self.r[i]
+
+
+@torch.no_grad()
+def run_eval(student, loader):
+    student.eval()
+    pc, tc, pr, tr = [], [], [], []
+    for t, a, v, mt, ma, mv, yc, yr in loader:
+        logits, reg, _, _ = student(t, a, v, mt, ma, mv)
+        pc.extend(logits.argmax(-1).numpy().tolist())
+        tc.extend(yc.numpy().tolist())
+        pr.extend(reg.numpy().tolist())
+        tr.extend(yr.numpy().tolist())
+    return compute_metrics(tc, pc, tr, pr)
+
+
+def main():
+    t0 = time.time()
+    with open(ALIGNED_50, "rb") as f:
+        data = pickle.load(f)
+    tr_t, tr_a, tr_v, tr_c, tr_r = to_tensors(data["train"])
+    va_t, va_a, va_v, va_c, va_r = to_tensors(data["valid"])
+    te_t, te_a, te_v, te_c, te_r = to_tensors(data["test"])
+
+    tr_mt, tr_ma, tr_mv = build_mask(tr_t), build_mask(tr_a), build_mask(tr_v)
+    va_mt, va_ma, va_mv = build_mask(va_t), build_mask(va_a), build_mask(va_v)
+    te_mt, te_ma, te_mv = build_mask(te_t), build_mask(te_a), build_mask(te_v)
+
+    st_mu_t, st_sd_t = fit_scaler(tr_t, tr_mt)
+    st_mu_a, st_sd_a = fit_scaler(tr_a, tr_ma)
+    st_mu_v, st_sd_v = fit_scaler(tr_v, tr_mv)
+    tr_t, va_t, te_t = apply_scaler(tr_t, st_mu_t, st_sd_t), apply_scaler(va_t, st_mu_t, st_sd_t), apply_scaler(te_t, st_mu_t, st_sd_t)
+    tr_a, va_a, te_a = apply_scaler(tr_a, st_mu_a, st_sd_a), apply_scaler(va_a, st_mu_a, st_sd_a), apply_scaler(te_a, st_mu_a, st_sd_a)
+    tr_v, va_v, te_v = apply_scaler(tr_v, st_mu_v, st_sd_v), apply_scaler(va_v, st_mu_v, st_sd_v), apply_scaler(te_v, st_mu_v, st_sd_v)
+
+    counts = torch.bincount(tr_c, minlength=3).float()
+    cls_w = counts.sum() / (3.0 * counts)
+
+    train_loader = DataLoader(DS(tr_t, tr_a, tr_v, tr_c, tr_r, tr_mt, tr_ma, tr_mv), batch_size=BATCH_SIZE, shuffle=True)
+    valid_loader = DataLoader(DS(va_t, va_a, va_v, va_c, va_r, va_mt, va_ma, va_mv), batch_size=BATCH_SIZE)
+    test_loader = DataLoader(DS(te_t, te_a, te_v, te_c, te_r, te_mt, te_ma, te_mv), batch_size=BATCH_SIZE)
+
+    # 教师：MAMFN d=64（已训练好）
+    teacher = MAMFN(d_model=D_MODEL).to(DEVICE)
+    ckpt = torch.load(Q2_MODEL, map_location=DEVICE, weights_only=True)
+    teacher.load_state_dict(ckpt["state_dict"])
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
+    print(f"teacher loaded from {Q2_MODEL}")
+
+    # 学生：AEMN d=32
+    student = AEMN(d_model=STUDENT_D).to(DEVICE)
+    n_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
+    print(f"student params: {n_params:,} (d={STUDENT_D})")
+
+    opt = torch.optim.AdamW(student.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
+    ce_loss = torch.nn.CrossEntropyLoss(weight=cls_w)
+    huber_loss = torch.nn.HuberLoss(delta=1.0)
+    kd_loss = torch.nn.KLDivLoss(reduction="batchmean")
+
+    rows = []
+    best_f1 = -1.0
+    best_state = None
+    patience = 8
+    bad_epochs = 0
+    for epoch in range(1, EPOCHS + 1):
+        student.train()
+        tl = tkd = tce = thub = 0.0; nb = 0
+        for t, a, v, mt, ma, mv, yc, yr in train_loader:
+            # 教师软标签
+            with torch.no_grad():
+                t_logits, t_reg = teacher(t, a, v, mt, ma, mv)
+                t_soft = F.softmax(t_logits / T_DISTILL, dim=-1)
+            # 学生
+            s_logits, s_reg, _, _ = student(t, a, v, mt, ma, mv)
+            s_log_soft = F.log_softmax(s_logits / T_DISTILL, dim=-1)
+            # 蒸馏损失（分类）
+            l_kd = kd_loss(s_log_soft, t_soft) * (T_DISTILL ** 2)
+            # 真实标签损失
+            l_ce = ce_loss(s_logits, yc)
+            l_hub = huber_loss(s_reg, yr)
+            loss = ALPHA_DISTILL * l_kd + (1 - ALPHA_DISTILL) * (LAMBDA_CE * l_ce + LAMBDA_MSE * l_hub)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            opt.step()
+            tl += loss.item(); tkd += l_kd.item(); tce += l_ce.item(); thub += l_hub.item(); nb += 1
+        sched.step()
+        vm = run_eval(student, valid_loader)
+        rows.append({"epoch": epoch, "train_loss": round(tl/nb, 5),
+                     "kd": round(tkd/nb, 5), "ce": round(tce/nb, 5), "huber": round(thub/nb, 5),
+                     **{f"val_{k}": v for k, v in vm.items()}})
+        print(f"Ep {epoch:02d}/{EPOCHS} loss={tl/nb:.4f} kd={tkd/nb:.4f} | f1={vm['macro_f1']:.4f} acc={vm['accuracy']:.4f}")
+        if vm["macro_f1"] > best_f1:
+            best_f1 = vm["macro_f1"]
+            best_state = {k: w.clone() for k, w in student.state_dict().items()}
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
+            if bad_epochs >= patience:
+                print(f"early stop at epoch {epoch}")
+                break
+
+    student.load_state_dict(best_state)
+    valid_m = run_eval(student, valid_loader)
+    test_m = run_eval(student, test_loader)
+    print("valid:", valid_m); print("test :", test_m)
+
+    # 覆盖 Q3 模型（学生模型就是 Q3 解释模型）
+    torch.save({"state_dict": best_state,
+                "scaler": {"t_mean": st_mu_t, "t_std": st_sd_t,
+                           "a_mean": st_mu_a, "a_std": st_sd_a,
+                           "v_mean": st_mu_v, "v_std": st_sd_v}}, Q3_MODEL)
+    with open(Q3_METRICS, "w", encoding="utf-8") as f:
+        json.dump({"valid": valid_m, "test": test_m,
+                   "distillation": {"teacher": "MAMFN_d64", "student": f"AEMN_d{STUDENT_D}",
+                                    "T": T_DISTILL, "alpha": ALPHA_DISTILL}}, f, indent=2, ensure_ascii=False)
+    pd.DataFrame(rows).to_csv(str(Q3_DIR / "training_log.csv"), index=False, encoding="utf-8-sig")
+    print(f"done in {(time.time()-t0)/60:.1f} min -> {Q3_MODEL}")
+
+
+if __name__ == "__main__":
+    main()

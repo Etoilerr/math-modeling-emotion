@@ -1,0 +1,10 @@
+E题数据/
+align_experiment/
+参考文献下载/
+models/*.pt
+Q1_features/*.npz
+Q3_results/keyframes/
+__pycache__/
+*.pyc
+*.zip
+.push_*.json

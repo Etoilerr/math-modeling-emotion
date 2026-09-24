@@ -1,0 +1,135 @@
+{
+  "task": "E题 Q2/Q3 MA-MFN 与 A-EMN",
+  "random_seeds": {
+    "numpy": 42,
+    "torch": 42,
+    "python_random": 42,
+    "PYTHONHASHSEED": 42
+  },
+  "environment": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "torch": "2.13.0+cpu",
+    "numpy": "2.5.2",
+    "transformers": "5.17.0",
+    "opencv-python": "5.0.0.93",
+    "scikit-learn": "1.9.1",
+    "scipy": "1.18.0",
+    "pandas": "3.0.5",
+    "matplotlib": "3.11.1",
+    "librosa": "1.0.0",
+    "python-docx": "1.2.0"
+  },
+  "input_files_sha256": {
+    "E题数据\\附件2-数据集特征文件\\aligned_50.pkl": {
+      "sha256": "66e867aa74bc70a844e806e5571e371c9abb4a35f9e2887ce9b4d97ff2cb8fcd",
+      "bytes": 993842861
+    },
+    "E题数据\\附件3-模态缺失特征样本\\对齐版本/(30 files)": {
+      "sha256_of_01": "b45b89a7eea55278abb130d44a6ee21128df5aa3239e68c968f9ac7743cfa0ea",
+      "count": 30
+    },
+    "E题数据\\附件4-可解释专项视频样本与特征文件\\附件4-可解释专项视频样本与特征文件\\对齐版本/(20 files)": {
+      "sha256_of_01": "5a08410ee779863238edcf349556a2f8e10490a70e02fc95001a64f6c8d17452",
+      "count": 20
+    }
+  },
+  "key_params": {
+    "Q2_MA-MFN": {
+      "seed": 42,
+      "batch_size": 64,
+      "epochs": 30,
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "d_model": 128,
+      "t_max": 50,
+      "lambda_ce": 1.0,
+      "lambda_mse": 0.5,
+      "aug_prob": 0.7,
+      "miss_len_range": [
+        5,
+        25
+      ],
+      "class_weights": [
+        1.170300006866455,
+        1.4930000305175781,
+        0.6776000261306763
+      ],
+      "n_params": 329860,
+      "best_val_macro_f1": 0.6028,
+      "selection": "valid macro-F1",
+      "label_mapping": {
+        "0": "Negative",
+        "1": "Neutral",
+        "2": "Positive"
+      },
+      "mask_rule": "M_m[t]=1 if ||x_m[t]||_1>0 else 0",
+      "standardize": "z-score using train valid-position statistics"
+    },
+    "Q3_A-EMN": {
+      "seed": 42,
+      "batch_size": 64,
+      "epochs": 30,
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "d_model": 128,
+      "t_max": 50,
+      "lambda_ce": 1.0,
+      "lambda_mse": 0.5,
+      "missing_augmentation": false,
+      "n_params": 330376,
+      "best_val_macro_f1": 0.6133,
+      "selection": "valid macro-F1",
+      "label_mapping": {
+        "0": "Negative",
+        "1": "Neutral",
+        "2": "Positive"
+      }
+    }
+  },
+  "metrics": {
+    "Q2": {
+      "valid": {
+        "accuracy": 0.6415,
+        "macro_f1": 0.6028,
+        "mae": 0.6061,
+        "pearson": 0.6404
+      },
+      "test": {
+        "accuracy": 0.6437,
+        "macro_f1": 0.5814,
+        "mae": 0.6665,
+        "pearson": 0.6501
+      }
+    },
+    "Q3": {
+      "valid": {
+        "accuracy": 0.6236,
+        "macro_f1": 0.6133,
+        "mae": 0.5944,
+        "pearson": 0.6486
+      },
+      "test": {
+        "accuracy": 0.6492,
+        "macro_f1": 0.6279,
+        "mae": 0.6526,
+        "pearson": 0.6524
+      }
+    }
+  },
+  "reproduction_commands": [
+    "cd D:\\Projects\\math_modling",
+    "python scripts\\extract_features.py",
+    "python scripts\\train_q2.py",
+    "python scripts\\predict_attachment3.py",
+    "python scripts\\missing_analysis.py",
+    "python scripts\\train_q3.py",
+    "python scripts\\explain_q3.py",
+    "python scripts\\make_figures.py",
+    "python scripts\\plot_extra_figures.py",
+    "python scripts\\repro_manifest.py"
+  ],
+  "python_interpreter": "D:\\Program Files\\computer language\\python.exe",
+  "notes": "标准化用 train 有效位置统计量；掩码 M_m[t]=1 if ||x_m[t]||_1>0；模型存 state_dict+scaler；CPU 训练。Q1 特征提取种子=20260923（见 features_aligned_50.npz['seed']），Q2/Q3 训练种子=42。predict_attachment3.py 用 bert-base-uncased 将附件3 text_bert token id 编码为 768 维（特征提取器，非外部情感训练集）。",
+  "manifest_build_seconds": 0.98
+}

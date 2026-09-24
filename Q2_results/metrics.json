@@ -1,0 +1,14 @@
+{
+  "valid": {
+    "accuracy": 0.5948,
+    "macro_f1": 0.5828,
+    "mae": 0.6503,
+    "pearson": 0.6144
+  },
+  "test": {
+    "accuracy": 0.663,
+    "macro_f1": 0.6375,
+    "mae": 0.7112,
+    "pearson": 0.6423
+  }
+}
